@@ -1,0 +1,98 @@
+# 專案環境變數設定
+#   ISOBAR_WINTOOLS_PATH_ID
+# 繼承設定
+#   ISOBAR_WINTOOLS_CK (Masked)
+#   ISOBAR_WINTOOLS_API
+
+stages:
+  - 同步至測試站
+  - 佈署至正式站
+
+before_script:
+  # 更改為英文避免錯誤訊息亂碼
+  - "[System.Threading.Thread]::CurrentThread.CurrentUICulture = 'en-US'"
+
+variables:
+  #自動佈署到測試站的路徑檔名規則。
+  REG_FILE_EXTENTION: \.(asax|ascx|ashx|aspx|config|cs|css|dll|gif|htm|html|ico|jpeg|jpg|js|master|png|prod|resx|sitemap|skin|svg|ttf|woff|xml)$
+
+sync-to-4test:
+  stage: 同步至測試站
+  only:
+    - master
+    - main
+  tags:
+    - windows-tag
+  # 測試環境名稱與網址
+  environment:
+    name: test
+    url: https://4project_name.isobar.com.tw/
+  script:
+    # 取得新增修改的檔案列表 | 複製到佈署目錄
+    - git diff-tree --no-commit-id --name-only -r --diff-filter=ACM $CI_COMMIT_BEFORE_SHA $CI_COMMIT_SHA
+      | Where-Object { $_ -match $env:REG_FILE_EXTENTION }
+      | ForEach-Object { echo $_ ; Copy-Item $_ -Destination (New-Item -Path (Split-Path -Path (Join-Path -Path $env:ISOBAR_PROJECT_PATH -ChildPath $_)) -Type Directory -Force) -Force }
+    # 取得刪除的檔案列表 | 複製到佈署目錄
+    - git diff-tree --no-commit-id --name-only -r --diff-filter=D $CI_COMMIT_BEFORE_SHA $CI_COMMIT_SHA
+      | Where-Object { $_ -match $env:REG_FILE_EXTENTION }
+      | ForEach-Object { echo $_ ; Remove-Item (Join-Path -Path $env:ISOBAR_PROJECT_PATH -ChildPath $_) }
+
+deploy-via-wintools:
+  stage: 佈署至正式站
+  only:
+    - master
+  when: manual
+  tags:
+    - windows-tag
+  # 測試環境名稱與網址
+  environment:
+    name: online
+    url: https://project_name.isobar.com.tw/
+  script:
+    # 暫存目錄名稱
+    - $deploy = 'deploy'
+    # 先刪除 $deploy 目錄
+    - if (Test-Path $deploy -PathType Container) { Remove-Item $deploy -Recurse -Force }
+    # 複製差異檔案至 $deploy 目錄
+    - git diff-tree --no-commit-id --name-only -r --diff-filter=ACM $CI_COMMIT_BEFORE_SHA $CI_COMMIT_SHA
+      | Where-Object { $_ -match $env:REG_FILE_EXTENTION }
+      | ForEach-Object {
+          echo $_ ;
+          Copy-Item $_ -Destination (New-Item -Path (Split-Path -Path (Join-Path -Path $deploy -ChildPath $_)) -Type Directory -Force) -Force
+      }
+    - if (-Not (Test-Path $deploy -PathType Container)) {
+        echo 'No file need to upload.';
+        exit 0;
+      }
+    # 因 Compress-Archive 以所在位置為相對路徑打包，故需切換至相對根目錄
+    - cd ($deploy)
+    # 產生的 ZIP 檔案不能放在要被打包的目錄中
+    - $zipFile = '..\' + $CI_COMMIT_BEFORE_SHA + '-' + $CI_COMMIT_SHA + '.zip'
+    - Get-ChildItem | ForEach-Object { Compress-Archive -Path $_ -DestinationPath $zipFile -Update }
+    # 上傳至 Wintools
+    - Try {
+        Add-Type -AssemblyName 'System.Net.Http';
+        $client = New-Object System.Net.Http.HttpClient;
+        $client.DefaultRequestHeaders.Add('ck', $ISOBAR_WINTOOLS_CK);
+        $content = New-Object System.Net.Http.MultipartFormDataContent;
+        $fileStream = [System.IO.File]::OpenRead((Join-Path -Path $pwd -ChildPath $zipFile));
+        $fileName = [System.IO.Path]::GetFileName($zipFile);
+        $fileContent = New-Object System.Net.Http.StreamContent($fileStream);
+        $content.Add($fileContent, 'patch', $fileName);
+        $content.Add((New-Object System.Net.Http.StringContent($ISOBAR_WINTOOLS_PATH_ID)), 'PathID');
+        $content.Add((New-Object System.Net.Http.StringContent($GITLAB_USER_EMAIL)), 'Email');
+        $content.Add((New-Object System.Net.Http.StringContent('FROM Gitlab CI, more info visit ' + $CI_JOB_URL)), 'Description');
+        $result = $client.PostAsync($ISOBAR_WINTOOLS_API, $content).Result;
+        $null = $result.EnsureSuccessStatusCode();
+        echo $result.Content.ReadAsStringAsync().Result;
+      }
+      Catch {
+        Write-Error $_;
+        exit 1;
+      }
+      Finally {
+        if ($client -ne $null) { $client.Dispose() }
+        if ($content -ne $null) { $content.Dispose() }
+        if ($fileStream -ne $null) { $fileStream.Dispose() }
+        if ($fileContent -ne $null) { $fileContent.Dispose() }
+      }

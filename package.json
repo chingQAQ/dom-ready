@@ -1,0 +1,11 @@
+{
+	"name": "dom-ready",
+	"version": "1.1.0",
+	"description": "Ensure dom is ready to execute script.",
+	"author": "luffy110661@gmail.com",
+	"license": "MIT",
+	"volta": {
+		"node": "14.17.6",
+		"npm": "7.24.0"
+	}
+}
